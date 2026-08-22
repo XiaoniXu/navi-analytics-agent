@@ -1,0 +1,10 @@
+metric_name,suggested_definition,notes
+DAU,Distinct users with one or more non-test app events on a calendar date after your event-quality treatment.,State the exact inclusion rule in your README.
+Agent adoption rate,Distinct users with an agent request divided by DAU for the same date and segment.,Document whether timeout or error interactions are included in adoption.
+Agent resolution rate,Agent interactions resolved without human handoff divided by relevant agent interactions.,Report alongside escalation to avoid treating the two as exact complements.
+Escalation rate,Agent interactions sent to human support divided by relevant agent interactions.,Clarify how errors and timeouts are handled.
+CSAT,Average satisfaction score among interactions that received a rating.,Do not invent ratings for unscored interactions.
+D1 retention,Eligible users active one calendar day after their first valid activity date.,Document eligibility and observation-window rules.
+D7 retention,Eligible users active seven calendar days after their first valid activity date.,Document eligibility and observation-window rules.
+Trial start rate,Eligible users who began a free trial divided by the selected cohort.,Keep the cohort and time window visible.
+Paid conversion rate,Eligible users who started a paid subscription divided by the selected cohort.,Do not conflate trial starts with paid conversion.
