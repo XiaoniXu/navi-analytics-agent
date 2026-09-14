@@ -183,6 +183,43 @@ dashboard demoable offline and lets the whole pipeline be tested without network
 
 ---
 
+## Deploying to Streamlit Community Cloud
+
+The app is deployment-ready: the warehouse is a **build artifact, not a committed file**, so on a
+fresh deployment `app.py` detects the missing database and runs the ETL once at first boot (about
+20 seconds, cached per container). The raw CSVs are in the repo, so the deployed warehouse is
+byte-identical to a local one.
+
+1. Go to **share.streamlit.io** and sign in with GitHub.
+2. **New app** → pick this repository, branch `main`, main file `app.py`.
+3. Under **Advanced settings**, set Python to **3.11**.
+4. Still in Advanced settings, paste into **Secrets**:
+
+   ```toml
+   OPENAI_API_KEY = "sk-..."
+   OPENAI_MODEL = "gpt-5-mini"
+   ```
+
+5. **Deploy.**
+
+`app.py` promotes `st.secrets` into environment variables before importing the agent, so the same
+code reads `.env` locally and Streamlit secrets in the cloud with no branching.
+
+### Before you deploy with a key
+
+**A public app with a live API key means anyone who opens the URL can spend your OpenAI credit.**
+Each question costs about $0.002, so casual traffic is cheap, but the exposure is unbounded and
+the app has no rate limiting. Pick one:
+
+| Option | Cost risk | Demo quality |
+|---|---|---|
+| Deploy **without** a key | None | Agent runs the deterministic planner; tool calls and audit still work, but it is not a live LLM |
+| Deploy **with** a key + a hard limit in the OpenAI dashboard | Capped at whatever you set | Full live tool calling |
+| Keep the app **private** (invite viewers by email) | None from strangers | Full live tool calling |
+
+If you deploy with a key, set a hard cap first: **platform.openai.com → Settings → Limits**, and
+keep the prepaid balance small. Rotate the key if the URL is ever shared more widely than intended.
+
 ## Repository
 
 ```

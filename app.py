@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -21,10 +22,63 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import metrics as M  # noqa: E402  (needs the sys.path line above)
-DB_PATH = Path(os.environ.get("NAVI_DB_PATH", PROJECT_ROOT / "warehouse" / "navi_analytics.db"))
-
 st.set_page_config(page_title="Navi Product Analytics", layout="wide", page_icon="📱")
+
+# Locally the key comes from .env. On Streamlit Community Cloud there is no .env -
+# secrets are entered in the app settings and exposed through st.secrets. Promote
+# them to environment variables here, before analytics_agent is imported, so the
+# agent module needs no knowledge of where it is running.
+for _key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_REASONING_EFFORT",
+             "OPENAI_MAX_OUTPUT_TOKENS"):
+    try:
+        if _key in st.secrets and not os.environ.get(_key):
+            os.environ[_key] = str(st.secrets[_key])
+    except Exception:
+        # No secrets.toml configured at all - normal for a local run.
+        break
+
+import metrics as M  # noqa: E402  (needs the sys.path line above)
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_warehouse() -> Path:
+    """Return a path to a built warehouse, building it first if necessary.
+
+    The database is deliberately not committed - it is a build artifact, and the
+    raw CSVs plus the ETL reproduce it exactly. That means a fresh deployment has
+    no warehouse on first boot, so build one. Cached as a resource, so this runs
+    once per container rather than once per page view.
+    """
+    explicit = os.environ.get("NAVI_DB_PATH")
+    if explicit:
+        return Path(explicit)
+
+    default = PROJECT_ROOT / "warehouse" / "navi_analytics.db"
+    if default.exists() and default.stat().st_size > 0:
+        return default
+
+    # Prefer the project folder; fall back to temp if the deployment's filesystem
+    # is read-only.
+    target = default
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        probe = target.parent / ".write_probe"
+        probe.touch()
+        probe.unlink()
+    except OSError:
+        target = Path(tempfile.gettempdir()) / "navi_analytics.db"
+
+    with st.spinner("First run: building the analytics warehouse from the raw CSVs "
+                    "(about 20 seconds). This happens once."):
+        os.environ["NAVI_DB_PATH"] = str(target)
+        import etl_pipeline
+
+        etl_pipeline.DB_PATH = target
+        etl_pipeline.run_pipeline()
+    return target
+
+
+DB_PATH = ensure_warehouse()
 
 # --------------------------------------------------------------------------
 # Chart system
@@ -163,8 +217,8 @@ def q(sql: str, params: tuple = ()) -> pd.DataFrame:
 if not DB_PATH.exists():
     st.title("Navi Product Analytics")
     st.error(
-        f"No warehouse found at `{DB_PATH}`.\n\n"
-        "Build it first:\n```bash\npython src/etl_pipeline.py\n```"
+        f"The warehouse could not be built at `{DB_PATH}`.\n\n"
+        "Build it manually and restart:\n```bash\npython src/etl_pipeline.py\n```"
     )
     st.stop()
 
