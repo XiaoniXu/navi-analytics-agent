@@ -1,0 +1,17 @@
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Keeps the app chrome out of the way; also keeps submission screenshots clean.
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f6f4"
+textColor = "#0b0b0b"
+font = "sans serif"
