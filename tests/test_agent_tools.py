@@ -185,6 +185,45 @@ def test_retention():
     check("retention groups by all 5 channels", len(res["results"]) == 5)
 
 
+def test_trend_excludes_partial_periods():
+    """A change computed across clipped edge buckets is a calendar artifact.
+
+    April 2026 starts mid-week and ends mid-week, so the first and last weekly
+    buckets hold 5 and 4 days. Comparing them yields -75.4%; comparing complete
+    weeks yields -53.0%. The tool must report the latter and label the former.
+    """
+    res = T.get_dau_trend(start_date="2026-04-01", end_date="2026-04-30",
+                          granularity="week", **{s: None for s in T.VALID_GROUPS})
+    rows = res["results"]
+    partial = [r for r in rows if not r["is_complete_period"]]
+    check("partial weeks are flagged, not silently included", len(partial) == 2,
+          f"{len(partial)} flagged")
+    check("partial weeks are named in the result",
+          set(res["partial_periods_excluded"]) == {"2026-03-30", "2026-04-27"})
+    check("change compares complete periods only",
+          res["change_compares"]["complete_periods_only"] is True)
+
+    complete = [r for r in rows if r["is_complete_period"]]
+    expected = round((complete[-1]["avg_dau"] - complete[0]["avg_dau"])
+                     / complete[0]["avg_dau"] * 100, 1)
+    check("change matches a complete-period recomputation",
+          approx(res["first_to_last_change_pct"], expected, 0.05),
+          f"{res['first_to_last_change_pct']} vs {expected}")
+
+    naive = round((rows[-1]["avg_dau"] - rows[0]["avg_dau"]) / rows[0]["avg_dau"] * 100, 1)
+    check("the naive edge-to-edge change is NOT what gets reported",
+          abs(res["first_to_last_change_pct"] - naive) > 10,
+          f"reported {res['first_to_last_change_pct']}, naive {naive}")
+    check("a caveat warns the caller off recomputing it",
+          "partial" in (res["metadata"].get("caveat") or "").lower())
+
+    # A range aligned to whole weeks should flag nothing.
+    clean = T.get_dau_trend(start_date="2026-02-02", end_date="2026-03-01",
+                            granularity="week", **{s: None for s in T.VALID_GROUPS})
+    check("no partial flags when the range aligns to whole weeks",
+          clean["partial_periods_excluded"] == [], str(clean["partial_periods_excluded"]))
+
+
 def test_metric_definitions():
     res = T.get_metric_definition(metric_name="DAU")
     check("metric definition returns the implemented rule",
@@ -265,6 +304,7 @@ def main() -> int:
     print(f"Testing against warehouse: {T.DB_PATH}\n")
     for fn in [
         test_dau_total, test_dau_by_country, test_dau_filter_combination,
+        test_trend_excludes_partial_periods,
         test_agent_health, test_agent_health_by_intent, test_subscriptions,
         test_retention, test_metric_definitions, test_coverage,
         test_rejects_bad_input, test_database_is_read_only, test_returns_aggregates_only,

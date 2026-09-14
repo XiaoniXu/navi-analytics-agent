@@ -20,6 +20,7 @@ outside that list raises before any SQL is built.
 """
 from __future__ import annotations
 
+import calendar
 import os
 import re
 import sqlite3
@@ -313,6 +314,19 @@ def _rows(cursor) -> list[dict[str, Any]]:
     return out
 
 
+def _expected_days(granularity: str, period: str) -> int:
+    """Days in a complete bucket. Months vary, so the period label decides."""
+    if granularity == "day":
+        return 1
+    if granularity == "week":
+        return 7
+    try:
+        year, month = int(period[:4]), int(period[5:7])
+        return calendar.monthrange(year, month)[1]
+    except (ValueError, IndexError):
+        return 28
+
+
 def _percentile(values: list[float], pct: float) -> float | None:
     """Linear-interpolated percentile, matching numpy's default method.
 
@@ -459,17 +473,44 @@ def get_dau_trend(**kwargs: Any) -> dict[str, Any]:
     with _connect() as conn:
         rows = _rows(conn.execute(sql, [start, end, *params]))
 
+    # Mark partial buckets. The first and last period of a range are usually clipped
+    # by the range boundary, so comparing them to full periods manufactures a dramatic
+    # change that is an artifact of the calendar, not the product. The comparison below
+    # therefore uses complete periods only, and the partial ones are labelled so a
+    # caller cannot quote them by accident.
+    for r in rows:
+        r["is_complete_period"] = int(r["days_in_period"] >= _expected_days(granularity, r["period"]))
+
+    complete = [r for r in rows if r["is_complete_period"]]
+    basis = complete if len(complete) >= 2 else rows
     change = None
-    if len(rows) >= 2 and rows[0]["avg_dau"]:
-        change = round((rows[-1]["avg_dau"] - rows[0]["avg_dau"]) / rows[0]["avg_dau"] * 100, 1)
+    if len(basis) >= 2 and basis[0]["avg_dau"]:
+        change = round((basis[-1]["avg_dau"] - basis[0]["avg_dau"]) / basis[0]["avg_dau"] * 100, 1)
+
+    partial = [r["period"] for r in rows if not r["is_complete_period"]]
+    caveat = None
+    if partial:
+        caveat = (
+            f"{len(partial)} partial {granularity}(s) at the range edges ({', '.join(partial)}) are "
+            f"clipped by the date range and are NOT used in the change calculation. Quote "
+            f"first_to_last_change_pct, which compares complete periods only; do not compute a "
+            f"change from the first and last rows of the table yourself."
+        )
 
     return {
         "metadata": _meta(
             f"DAU trend by {granularity}", start, end, None, applied, "mart_user_day + dim_date",
+            caveat=caveat,
         ),
         "results": rows,
         "row_count": len(rows),
-        "first_to_last_period_change_pct": change,
+        "first_to_last_change_pct": change,
+        "change_compares": (
+            {"from": basis[0]["period"], "to": basis[-1]["period"],
+             "complete_periods_only": bool(len(complete) >= 2)}
+            if len(basis) >= 2 else None
+        ),
+        "partial_periods_excluded": partial,
     }
 
 

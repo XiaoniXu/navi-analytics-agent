@@ -749,11 +749,13 @@ context, and reads the same marts as the charts, so a number it reports can be r
             st.markdown(answer)
             final = next((a for a in audit if a.get("summary") == "run complete"), {})
             tools_used = [a["tool"] for a in audit if "tool" in a]
+            reasoning = final.get("reasoning_tokens", 0) or 0
             st.caption(
                 f"tools: {', '.join(tools_used) or 'none'} · "
                 f"api calls: {final.get('api_calls', 0)} · "
                 f"cost: ${final.get('estimated_cost_usd', 0):.5f} · "
                 f"{final.get('total_latency_ms', 0):.0f} ms"
+                + (f" · {reasoning:,} reasoning tokens" if reasoning else "")
             )
         st.session_state.chat.append({"role": "assistant", "content": answer, "audit": audit})
         st.rerun()

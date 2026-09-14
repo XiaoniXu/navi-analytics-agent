@@ -79,8 +79,9 @@ appears in any tool output. A prompt-level instruction alone would not be suffic
 
 `run_analytics_agent()` dispatches to whichever is available:
 
-- **`OpenAIAgent`** (production) — Responses API with tool calling, up to 4 tool rounds, 700-token
-  output cap. Reports measured token cost per answer.
+- **`OpenAIAgent`** (production) — Responses API with tool calling, up to 4 tool rounds, a
+  2000-token output budget at `low` reasoning effort. Reports measured cost and reasoning-token
+  count per answer, retries once if a response is truncated, and never returns a blank answer.
 - **`OfflineAgent`** (fallback) — deterministic rule-based tool selection over the *same* validated
   tools, producing the *same* audit trail.
 
@@ -94,6 +95,26 @@ A live OpenAI failure falls back to it automatically and records the exception i
 Every data-backed answer states the metric, the date range, the filters, and the result, then any
 caveat. Numbers come only from tool results — the system prompt forbids arithmetic the tools did
 not do, and forbids reusing a figure from earlier in the conversation.
+
+## A bug the live run caught
+
+The first live run returned **empty answers** for most questions while the tool audit showed the
+tools had run correctly. `gpt-5-mini` bills its internal reasoning tokens as output and counts them
+against `max_output_tokens`; the original 700-token budget was consumed entirely by reasoning, so
+the response was truncated before the model wrote a visible word — and the SDK surfaced that as an
+empty string, not an error.
+
+Three changes, because one would not have been enough:
+
+1. The output budget now covers reasoning plus an answer (2000 tokens), with `reasoning.effort`
+   set to `low` for what is a routing-and-summarise task.
+2. A truncated response (`status == "incomplete"`) is detected and retried once with a doubled
+   budget, and the truncation is recorded in the audit.
+3. Empty text is never returned to the user. If the model still produces nothing, the agent says
+   so and points at the tool result it already has.
+
+The offline planner was unaffected, which is exactly why it could not have caught this: the bug
+lived in the part of the pipeline only a live model exercises.
 
 ## Known limitations
 

@@ -7,3 +7,6 @@ warehouse/*
 **/.DS_Store
 .streamlit/secrets.toml
 !warehouse/.gitkeep
+
+# Files delivered into the chat by Claude (duplicates of docs/screenshots/)
+Claude outputs/

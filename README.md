@@ -158,10 +158,24 @@ OPENAI_MODEL=gpt-5-mini
 
 3. Keep `.env` out of version control — `.gitignore` already covers it.
 
-A tool-backed question costs roughly **$0.0015** with `gpt-5-mini` (about two model turns). 100
-questions ≈ $0.15; **$3–5 of prepaid credit is ample** for building, testing and demoing. The agent
-displays the measured token cost of every answer beneath it. Cost is kept low by design: a small
-tool set, aggregate-only returns, a 700-token output cap, and no web-search tools.
+A tool-backed question costs roughly **$0.002–0.003** with `gpt-5-mini` (two model turns). 100
+questions ≈ $0.25; **$3–5 of prepaid credit is ample** for building, testing and demoing. The agent
+displays the measured cost and reasoning-token count of every answer beneath it.
+
+**Reasoning-token budget.** `gpt-5-mini` is a reasoning model: its internal reasoning tokens are
+billed as output *and* count against `max_output_tokens`. A budget sized only for the visible
+answer gets consumed by reasoning, and the API returns a truncated response with **empty text** —
+a silent blank answer rather than an error. The defaults account for this:
+
+| Setting | Default | Override |
+|---|---|---|
+| Output budget (reasoning + answer) | 2000 tokens | `OPENAI_MAX_OUTPUT_TOKENS` |
+| Reasoning effort | `low` | `OPENAI_REASONING_EFFORT` |
+
+`reasoning` is only sent for models that accept it (gpt-5 and o-series), so `gpt-4o-mini` still
+works. If a response is still truncated, the agent retries once with a doubled budget, and if the
+model returns no text at all it says so and points at the tool audit rather than showing a blank
+answer. Cost is otherwise kept low by a small tool set, aggregate-only returns, and no web-search tools.
 
 If no key is present, the agent runs its **deterministic planner** — the same validated tools and
 the same audit trail, with rule-based tool selection instead of a language model. This keeps the

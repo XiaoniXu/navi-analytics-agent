@@ -45,7 +45,20 @@ except Exception:  # pragma: no cover - dotenv is optional at runtime
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 MAX_TOOL_ROUNDS = 4
-MAX_OUTPUT_TOKENS = 700
+
+# Reasoning models bill their internal reasoning tokens as output AND count them
+# against max_output_tokens. A budget sized only for the visible answer gets spent
+# on reasoning, and the response comes back truncated with empty output_text - a
+# silent blank answer rather than an error. The budget below covers reasoning plus
+# a short answer, and REASONING_EFFORT keeps the reasoning share small for what is
+# a routing-and-summarise task, not a hard inference problem.
+MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2000"))
+REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
+
+def _is_reasoning_model(model: str) -> bool:
+    """gpt-5 family and o-series accept the `reasoning` parameter; gpt-4o does not."""
+    m = model.lower()
+    return m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
 
 # Per-1M-token prices used only to show the reviewer what a question costs.
 AGENT_MODEL_PRICING = {
@@ -77,8 +90,17 @@ Rules you must follow:
   instead of guessing.
 - If no tool can answer the question, say what the warehouse does and does not
   contain. Never answer from outside the warehouse.
-- You return aggregate product analytics only. Refuse requests for individual
-  user records or personal data.
+- You return aggregate product analytics only. Refuse requests for individual user
+  records or personal data, and do NOT offer a user-level alternative - not a ranked
+  list of users, not "anonymised" or "de-identified" user IDs. Pseudonymous IDs are
+  still user-level, no tool can produce them, and offering one promises something
+  this system cannot and should not deliver. Offer a SEGMENT-level alternative
+  instead: the same question cut by country, device, acquisition channel, app
+  version, intent, or time period.
+- Never invent a change or a percentage from rows in a table. If a tool returns a
+  computed change field, quote that field. Tools exclude partial periods from their
+  change calculations for good reason; recomputing from the first and last rows of a
+  table reintroduces the error the tool removed.
 - Be concise: two to five sentences, plus a small table when comparing segments.
 """.strip()
 
@@ -127,30 +149,80 @@ def _run_openai(
     client = OpenAI()
     audit: list[dict[str, Any]] = []
     started = time.perf_counter()
-    usage = {"input_tokens": 0, "output_tokens": 0, "model": MODEL, "api_calls": 0}
+    usage = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+             "model": MODEL, "api_calls": 0}
 
     parts = [p for p in (_context_preamble(dashboard_context), f"Question: {question}") if p]
     input_items: list[Any] = [{"role": "user", "content": "\n".join(parts)}]
 
+    budget = MAX_OUTPUT_TOKENS
+
+    def _call(items: list, max_tokens: int):
+        kwargs: dict[str, Any] = {
+            "model": MODEL,
+            "instructions": SYSTEM_INSTRUCTIONS,
+            "tools": TOOLS,
+            "input": items,
+            "max_output_tokens": max_tokens,
+        }
+        if _is_reasoning_model(MODEL):
+            kwargs["reasoning"] = {"effort": REASONING_EFFORT}
+        return client.responses.create(**kwargs)
+
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.responses.create(
-            model=MODEL,
-            instructions=SYSTEM_INSTRUCTIONS,
-            tools=TOOLS,
-            input=input_items,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        )
+        response = _call(input_items, budget)
         usage["api_calls"] += 1
         if getattr(response, "usage", None):
             usage["input_tokens"] += getattr(response.usage, "input_tokens", 0) or 0
             usage["output_tokens"] += getattr(response.usage, "output_tokens", 0) or 0
+            details = getattr(response.usage, "output_tokens_details", None)
+            usage["reasoning_tokens"] += getattr(details, "reasoning_tokens", 0) or 0
 
         input_items.extend(response.output)
         calls = [item for item in response.output if item.type == "function_call"]
 
         if not calls:
+            text = (response.output_text or "").strip()
+
+            # A truncated response returns no visible text. Retry once with a larger
+            # budget rather than handing back a blank answer.
+            if not text and getattr(response, "status", "") == "incomplete":
+                reason = getattr(getattr(response, "incomplete_details", None), "reason", "")
+                audit.append({
+                    "summary": "response truncated, retrying with a larger output budget",
+                    "reason": reason or "unknown",
+                    "budget_tokens": budget,
+                })
+                if reason == "max_output_tokens" and budget < 4000:
+                    budget = min(budget * 2, 4000)
+                    response = _call(input_items, budget)
+                    usage["api_calls"] += 1
+                    if getattr(response, "usage", None):
+                        usage["input_tokens"] += getattr(response.usage, "input_tokens", 0) or 0
+                        usage["output_tokens"] += getattr(response.usage, "output_tokens", 0) or 0
+                        details = getattr(response.usage, "output_tokens_details", None)
+                        usage["reasoning_tokens"] += getattr(details, "reasoning_tokens", 0) or 0
+                    input_items.extend(response.output)
+                    text = (response.output_text or "").strip()
+
+            if not text:
+                # Still nothing to show. Say so, and surface the data that was
+                # already fetched rather than returning an empty bubble.
+                fetched = [a for a in audit if a.get("tool") and "result" in a]
+                if fetched:
+                    last = fetched[-1]
+                    text = (
+                        "The model returned no text for this question, but the tool call "
+                        f"succeeded. `{last['tool']}` returned {last['result_summary']} for "
+                        f"{(last.get('date_range') or {}).get('start', '?')} → "
+                        f"{(last.get('date_range') or {}).get('end', '?')}. "
+                        "Open the tool audit below for the figures, or re-ask more specifically."
+                    )
+                else:
+                    text = ("The model returned no answer for that question. Try rephrasing it, "
+                            "or name a metric and a date range explicitly.")
             audit.append(_finalize(usage, started))
-            return response.output_text, audit
+            return text, audit
 
         for call in calls:
             t0 = time.perf_counter()
@@ -191,6 +263,10 @@ def _finalize(usage: dict[str, Any], started: float) -> dict[str, Any]:
         "api_calls": usage["api_calls"],
         "input_tokens": usage["input_tokens"],
         "output_tokens": usage["output_tokens"],
+        # Reasoning tokens are billed as output but never shown to the user. Surfacing
+        # them makes it obvious where the cost and the latency actually went.
+        "reasoning_tokens": usage["reasoning_tokens"],
+        "reasoning_effort": REASONING_EFFORT if _is_reasoning_model(usage["model"]) else "n/a",
         "estimated_cost_usd": round(cost, 6),
         "total_latency_ms": round((time.perf_counter() - started) * 1000, 1),
     }
@@ -559,15 +635,16 @@ def _explain(tool: str, args: dict, result: dict, question: str, focus: str | No
 
     if tool == "get_dau_trend":
         gran = args.get("granularity", "day")
-        expected_days = {"day": 1, "week": 7, "month": 28}[gran]
-        # A partial first or last bucket would make the change look dramatic for no
-        # real reason, so the comparison uses complete periods only.
-        complete = [r for r in rows if (r.get("days_in_period") or 0) >= expected_days] or rows
+        # The tool owns the partial-period rule; read its answer rather than
+        # recomputing it here, so both backends quote the same number.
+        complete = [r for r in rows if r.get("is_complete_period")] or rows
         first, last = complete[0], complete[-1]
-        change = ((last["avg_dau"] - first["avg_dau"]) / first["avg_dau"] * 100) if first["avg_dau"] else 0
+        change = result.get("first_to_last_change_pct")
+        if change is None:
+            change = ((last["avg_dau"] - first["avg_dau"]) / first["avg_dau"] * 100) if first["avg_dau"] else 0
         direction = "rose" if change > 0 else "fell" if change < 0 else "was flat"
         peak = max(rows, key=lambda r: r["avg_dau"] or 0)
-        partial = len(rows) - len(complete)
+        partial = len(result.get("partial_periods_excluded") or [])
         note = f" ({partial} partial {gran} bucket(s) excluded from the comparison)" if partial else ""
         body = (
             f"Across {window}{filter_text}, average DAU {direction} {abs(change):.1f}% from "
@@ -866,10 +943,14 @@ def _cli() -> int:
         tools_used = [a["tool"] for a in audit if "tool" in a]
         final = next((a for a in audit if a.get("summary") == "run complete"), {})
         total_cost += final.get("estimated_cost_usd", 0.0) or 0.0
+        reasoning = final.get("reasoning_tokens", 0) or 0
         print(f"\n[audit] tools: {', '.join(tools_used) or 'none'} | "
               f"api calls: {final.get('api_calls', 0)} | "
               f"cost: ${final.get('estimated_cost_usd', 0):.5f} | "
-              f"{final.get('total_latency_ms', 0):.0f} ms")
+              f"{final.get('total_latency_ms', 0):.0f} ms"
+              + (f" | reasoning tokens: {reasoning:,}" if reasoning else ""))
+        if not answer.strip():
+            print("  !! empty answer - this should not happen; check the audit above")
 
     print("\n" + "=" * 78)
     print(f"Total estimated cost for this run: ${total_cost:.5f}")
